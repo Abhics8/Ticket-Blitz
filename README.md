@@ -12,7 +12,7 @@
 
 [🚀 Live Demo](#) | [📊 API Docs](#) | [🎥 System Demo](#) | [💼 Portfolio](https://ab0204.github.io/Portfolio/)
 
-![TicketBlitz Dashboard](https://via.placeholder.com/800x400/0f172a/1e293b?text=TicketBlitz+Real-Time+Dashboard)
+![TicketBlitz Dashboard](assets/ticketblitz-dashboard.png)
 
 ---
 
