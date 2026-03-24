@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-blitz-api
+  labels:
+    app: ticket-blitz
+    component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ticket-blitz
+      component: api
+  template:
+    metadata:
+      labels:
+        app: ticket-blitz
+        component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+    spec:
+      containers:
+      - name: api
+        image: ticket-blitz-api:latest
+        ports:
+        - containerPort: 3000
+        envFrom:
+        - configMapRef:
+            name: ticket-blitz-config
+        - secretRef:
+            name: ticket-blitz-secrets
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 15
+          periodSeconds: 20
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ticket-blitz-worker
+  labels:
+    app: ticket-blitz
+    component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ticket-blitz
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: ticket-blitz
+        component: worker
+    spec:
+      containers:
+      - name: worker
+        image: ticket-blitz-worker:latest
+        envFrom:
+        - configMapRef:
+            name: ticket-blitz-config
+        - secretRef:
+            name: ticket-blitz-secrets
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi

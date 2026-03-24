@@ -1,3 +1,4 @@
+import './tracing';
 import Fastify, { FastifyInstance, RouteShorthandOptions } from 'fastify';
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';

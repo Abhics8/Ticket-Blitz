@@ -1,3 +1,4 @@
+import './tracing';
 import { Kafka } from 'kafkajs';
 import { PrismaClient } from '@prisma/client';
 import Redis from 'ioredis';

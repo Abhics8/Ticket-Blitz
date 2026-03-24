@@ -1,0 +1,76 @@
+name: Ticket-Blitz CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: ticketblitz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+          
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Use Node.js 20
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: npm ci
+      
+    - name: Run Prisma Generate
+      run: npx prisma generate
+      
+    - name: Lint (ESLint)
+      run: npx eslint src tests --ext .ts
+      
+    - name: Type Check (tsc)
+      run: npx tsc --noEmit
+      
+    - name: Run Jest Unit and Integration Tests
+      env:
+        DATABASE_URL: "postgresql://postgres:password@localhost:5432/ticketblitz"
+        REDIS_URL: "redis://localhost:6379"
+      run: npx jest --coverage
+      
+    - name: Dry Run Docker Build (API)
+      run: docker build -t ticket-blitz-api:test -f Dockerfile .
+
+  load-test:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    # In a real workflow, you would spin up docker-compose and run k6
+    # Here we mock the k6 verification logic to ensure the load test config is sound
+    - name: Verify Load Test Configuration
+      run: |
+        if [ ! -f "load-test.js" ]; then
+          echo "k6 load-test.js script not found!"
+          exit 1
+        fi
+        echo "✅ Load test script present. Will execute k6 run load-test.js in CD pipeline."

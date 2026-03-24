@@ -133,34 +133,32 @@ Major ticketing platforms like Ticketmaster face **revenue losses of $15M+ annua
 
 ### **Critical Path: Seat Reservation Flow**
 
-```
-User Clicks "Reserve Seat"
-  │
-  ├─► 1. Acquire Redis Lock (seat_id)
-  │     └─► SET seat:123:lock user_456 EX 30 NX
-  │           (30s TTL, fail if exists)
-  │
-  ├─► 2. Check PostgreSQL Availability
-  │     └─► SELECT * FROM seats WHERE id=123 AND status='available' FOR UPDATE
-  │           (Row-level lock, prevents dirty reads)
-  │
-  ├─► 3. Update Database (Optimistic Concurrency)
-  │     └─► UPDATE seats SET status='reserved', version=version+1 
-  │           WHERE id=123 AND version=current_version
-  │           (Version check prevents lost updates)
-  │
-  ├─► 4. Publish Kafka Event
-  │     └─► Producer.send('seat.reserved', {seat_id: 123, user_id: 456})
-  │
-  ├─► 5. Broadcast WebSocket Update
-  │     └─► ws.broadcast({type: 'SEAT_RESERVED', seat_id: 123})
-  │           (All connected clients see update <50ms)
-  │
-  └─► 6. Release Redis Lock
-        └─► DEL seat:123:lock
-              (Automatic expiration after 30s as backup)
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API Layer
+    participant R as Redis (Lock)
+    participant D as PostgreSQL
+    participant K as Kafka
+    participant W as WebSocket Server
 
-Total Time: ~87ms (P95 latency)
+    C->>A: POST /book (userId, seatId)
+    A->>R: SET seat:id:lock user:id EX 30 NX
+    alt Lock Acquired
+        R-->>A: OK
+        A->>D: SELECT * FROM seats FOR UPDATE
+        D-->>A: Row locked
+        A->>D: UPDATE seats SET status='BOOKED'
+        D-->>A: Commit success
+        A->>K: Produce BookingCreated Event
+        A->>W: Emit 'seat-update'
+        W-->>C: Update UI via socket (<50ms)
+        A-->>R: DEL seat:id:lock (Lua Script)
+        A-->>C: 200 OK
+    else Lock Denied
+        R-->>A: null
+        A-->>C: 409 Conflict (Seat taken)
+    end
 ```
 
 ---
@@ -235,6 +233,33 @@ Total Time: ~87ms (P95 latency)
 | **Playwright** | Cross-browser; auto-wait; screenshots; parallel execution | E2E testing |
 | **Locust** | Python-based; distributed load testing; real-time stats | Load testing (10K+ users) |
 | **K6** | Scriptable; cloud execution; threshold checks | Performance testing |
+
+## 🌐 Kubernetes & Horizontal Scaling
+
+Ticket-Blitz is natively designed to scale horizontally across commodity hardware.
+
+**To add more API instances behind a load balancer:**
+1. Our provided Kubernetes `hpa.yaml` automatically scales the fastify API layer on CPU utilization > 70%.
+2. Since the Redis lock server handles mutual exclusion, individual API instances share **zero state**.
+3. Kafka seamlessly rebalances consumer group partitions as new Worker nodes spin up.
+
+## 🌋 Chaos Engineering & Failure Matrices
+
+To prove resilience, we simulate infrastructure faults using Toxiproxy. Here is how the system degrades:
+
+| Component Failure | System Response | End-User Experience |
+|-------------------|-----------------|---------------------|
+| **Redis Crash** | API fails to acquire lock (Redis timeout); aborts booking immediately. | "Checkout unavailable" error (fail-fast prevents double booking). |
+| **Kafka Broker Down** | API buffers events in memory; blocks checkout if buffer overflows. | Checkout works until memory fills, then graceful 503 errors. |
+| **PostgreSQL Pool Full** | Transaction timeout. Redis lock expires via 30s TTL automatically. | "High traffic, try again." No phantom locking of seats. |
+
+## 🕵️ OpenTelemetry Distributed Tracing
+
+We instrument critical paths using OpenTelemetry to maintain observability:
+1. `POST /api/book` initiates a trace span in the API shell.
+2. The TraceID is injected cleanly into Kafka message headers.
+3. Workers extract the TraceID and append spans during DB updates.
+*(Trace data flows to Jaeger/Zipkin for identifying latency bottlenecks across microservice boundaries).*
 
 ---
 
@@ -592,6 +617,9 @@ TicketBlitz includes an educational dashboard showing internal system behavior i
 ```
 
 This visualization makes TicketBlitz an **excellent teaching tool** for distributed systems concepts.
+
+> **Watch the system in action:**
+> ![Real-Time Visualizer Demo](assets/visualizer-demo.gif)
 
 ---
 
