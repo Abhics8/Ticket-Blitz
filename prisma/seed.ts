@@ -2,44 +2,37 @@ import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
 
+// Demo default is 100 seats (snappy UI). Override for load testing: SEAT_COUNT=5000.
+const SEAT_COUNT = Number(process.env.SEAT_COUNT) || 100;
+
 async function main() {
-    console.log("Seeding database...");
+  const existing = await prisma.seat.count();
+  if (existing > 0) {
+    console.log(`Already seeded (${existing} seats). Skipping.`);
+    return;
+  }
 
-    // 1. Create the detailed Event "Taylor Swift Concert"
-    const event = await prisma.event.create({
-        data: {
-            name: "The Eras Tour",
-            date: new Date("2026-06-01"),
-            totalSeats: 10000
-        }
-    });
+  const event = await prisma.event.create({
+    data: { name: 'The Eras Tour', date: new Date('2026-06-01'), totalSeats: SEAT_COUNT },
+  });
 
-    console.log(`Created Event: ${event.name}`);
+  await prisma.seat.createMany({
+    data: Array.from({ length: SEAT_COUNT }, (_, i) => ({
+      number: i + 1,
+      row: 'A',
+      status: 'AVAILABLE',
+      eventId: event.id,
+    })),
+  });
 
-    // 2. Create 10,000 Seats (Batch insert is faster)
-    const seatsPayload = [];
-    for (let i = 1; i <= 10000; i++) {
-        seatsPayload.push({
-            number: i,
-            row: "A",
-            status: "AVAILABLE",
-            eventId: event.id
-        });
-    }
-
-    // Prisma createMany is efficient
-    await prisma.seat.createMany({
-        data: seatsPayload
-    });
-
-    console.log(`Seeded 10,000 seats for Event ID: ${event.id}`);
+  console.log(`Seeded ${SEAT_COUNT} seats for event ${event.id}`);
 }
 
 main()
-    .catch((e) => {
-        console.error(e);
-        process.exit(1);
-    })
-    .finally(async () => {
-        await prisma.$disconnect();
-    });
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

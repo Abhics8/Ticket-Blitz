@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: ticket-blitz-api
+    metrics_path: /metrics
+    static_configs:
+      # API instances run on the host during the local demo. Add/remove ports
+      # to match how many instances you start.
+      - targets:
+          - host.docker.internal:3000
+          - host.docker.internal:3001
+          - host.docker.internal:3002
+          - host.docker.internal:3003
+          - host.docker.internal:3004

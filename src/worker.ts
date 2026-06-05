@@ -1,91 +1,89 @@
 import './tracing';
-import { Kafka } from 'kafkajs';
-import { PrismaClient } from '@prisma/client';
-import Redis from 'ioredis';
+import { config } from './config';
+import { makeConsumer, getProducer, ensureTopics } from './lib/kafka';
+import { parse, DomainEvent } from './lib/events';
+import { startOutboxRelay } from './lib/outbox';
+import { releaseExpired } from './services/booking-service';
+import { admitBatch } from './lib/waiting-room';
+import { redis } from './lib/redis';
+import { dlqTotal } from './metrics';
 
-const prisma = new PrismaClient();
-const redis = new Redis({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: Number(process.env.REDIS_PORT) || 6379
-});
+/**
+ * Side-effect worker. Three responsibilities:
+ *   1. Outbox relay        — publish committed domain events to Kafka.
+ *   2. Event consumer      — react to events (analytics/notifications/audit),
+ *                            idempotently, with a dead-letter topic for poison
+ *                            and handler failures.
+ *   3. Reservation sweeper — expire stale HELD seats back to AVAILABLE.
+ *
+ * Real-time UI fan-out is NOT done here — the API tier owns that via the
+ * Socket.IO Redis adapter, which avoids duplicate broadcasts.
+ */
 
-const kafka = new Kafka({
-    clientId: 'ticket-blitz-worker',
-    brokers: process.env.KAFKA_BROKERS ? process.env.KAFKA_BROKERS.split(',') : ['localhost:9092']
-});
+async function handleEvent(event: DomainEvent): Promise<void> {
+  // Idempotent consumer: SET NX means we process each event id exactly once,
+  // even though the outbox guarantees only at-least-once delivery.
+  const fresh = await redis.set(`evt:${event.id}`, '1', 'EX', 3600, 'NX');
+  if (fresh !== 'OK') return;
 
-const consumer = kafka.consumer({ groupId: 'booking-group' });
+  // Side effects would go here (email, analytics rollups, audit log).
+  // Intentionally light — the point is the delivery guarantees around it.
+  console.log(`[worker] processed ${event.type} seat=${event.aggregateId}`);
+}
 
-async function processBooking(userId: string, seatNumber: number) {
-    const lockKey = `lock:seat:${seatNumber}`;
-    const lockTTL = 5;
+async function runConsumer(): Promise<void> {
+  const consumer = makeConsumer('booking-side-effects');
+  const producer = await getProducer();
+  await consumer.connect();
+  await consumer.subscribe({ topic: config.topics.bookingEvents, fromBeginning: false });
 
-    // 1. ACQUIRE LOCK
-    // @ts-ignore
-    const acquired = await redis.set(lockKey, userId, 'NX', 'EX', lockTTL);
-
-    if (!acquired) {
-        console.log(`[Worker] Seat ${seatNumber} Locked. Retrying or Ignoring.`);
-        // In a real system, we might push to a "retry-topic" with a delay.
-        // For now, we drop it.
-        return;
-    }
-
-    try {
-        const seat = await prisma.seat.findFirst({ where: { number: seatNumber } });
-        if (!seat || seat.status !== "AVAILABLE") {
-            console.log(`[Worker] Seat ${seatNumber} Unavailable.`);
-            // Release lock early?
-            return;
-        }
-
-        // Simulate Processing
-        await new Promise(r => setTimeout(r, 50));
-
-        await prisma.user.upsert({
-            where: { email: userId },
-            update: {},
-            create: { id: userId, email: userId, name: "Worker User" }
+  await consumer.run({
+    eachMessage: async ({ message }) => {
+      let event: DomainEvent;
+      try {
+        event = parse(message.value);
+      } catch (err) {
+        // Poison pill: route to DLQ instead of crash-looping the consumer.
+        dlqTotal.inc({ reason: 'poison' });
+        await producer.send({
+          topic: config.topics.dlq,
+          messages: [{ value: message.value ?? Buffer.from('null'), headers: { error: String(err) } }],
         });
+        return;
+      }
 
-        await prisma.seat.update({ where: { id: seat.id }, data: { status: "BOOKED" } });
-        await prisma.booking.create({ data: { userId, seatId: seat.id } });
-
-        // PUBLISH EVENT (For Real-time UI)
-        await redis.publish('seat-updates', JSON.stringify({ seatNumber, status: "BOOKED" }));
-
-        console.log(`[Worker] SUCCESS: Booked Seat ${seatNumber} for ${userId}`);
-
-    } catch (e) {
-        console.error("[Worker] Error:", e);
-    } finally {
-        const unlockScript = `
-            if redis.call("get", KEYS[1]) == ARGV[1] then
-                return redis.call("del", KEYS[1])
-            else
-                return 0
-            end
-        `;
-        // @ts-ignore
-        await redis.eval(unlockScript, 1, lockKey, userId);
-    }
+      try {
+        await handleEvent(event);
+      } catch (err) {
+        dlqTotal.inc({ reason: 'handler' });
+        await producer.send({
+          topic: config.topics.dlq,
+          messages: [{ key: event.aggregateId, value: message.value!, headers: { error: String(err) } }],
+        });
+      }
+    },
+  });
 }
 
-export const runWorker = async () => {
-    await consumer.connect();
-    await consumer.subscribe({ topic: 'booking-requests', fromBeginning: true });
+async function main(): Promise<void> {
+  await ensureTopics();
+  startOutboxRelay();
 
-    console.log("Worker Listening...");
+  setInterval(() => {
+    releaseExpired().catch((e) => console.error('[sweeper] error:', e));
+  }, config.sweepMs);
 
-    await consumer.run({
-        eachMessage: async ({ topic, partition, message }) => {
-            if (!message.value) return;
-            const payload = JSON.parse(message.value.toString());
-            await processBooking(payload.userId, payload.seatNumber);
-        },
-    });
-};
+  if (config.waitingRoom.enabled) {
+    setInterval(() => {
+      admitBatch('default').catch(() => undefined);
+    }, config.waitingRoom.tickMs);
+  }
 
-if (process.env.SINGLE_PROCESS !== 'true' && require.main === module) {
-    runWorker().catch(console.error);
+  await runConsumer();
+  console.log('[worker] running — outbox relay + consumer + sweeper');
 }
+
+main().catch((err) => {
+  console.error('[worker] fatal:', err);
+  process.exit(1);
+});

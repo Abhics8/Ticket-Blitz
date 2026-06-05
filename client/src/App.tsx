@@ -18,143 +18,112 @@ function App() {
   const [seats, setSeats] = useState<Seat[]>(
     Array.from({ length: 100 }, (_, i) => ({ id: i + 1, status: 'AVAILABLE' }))
   );
-
-  // Track "optimistic" booking attempts to show spinner/yellow state
-  const [pendingSeats, setPendingSeats] = useState<Set<number>>(new Set());
-
   const [metrics, setMetrics] = useState({ booked: 0, available: 100 });
   const [telemetry, setTelemetry] = useState({
     locksAcquired: 0,
     kafkaEvents: 0,
     dbWrites: 0,
     lastActionType: 'DB' as 'LOCK' | 'KAFKA' | 'DB',
-    lastActionMessage: 'System Ready'
+    lastActionMessage: 'System Ready',
   });
 
+  const setSeatStatus = (id: number, status: SeatStatus) =>
+    setSeats((prev) => prev.map((s) => (s.id === id ? { ...s, status } : s)));
+
+  // Initial sync + live updates from OTHER clients (via the server's socket push).
   useEffect(() => {
-    // 0. Initial Data Fetch
     const fetchSeats = async () => {
       try {
         const res = await fetch(`${API_URL}/api/seats`);
-        if (!res.ok) throw new Error('Failed to fetch seats');
+        if (!res.ok) throw new Error(String(res.status));
         const data = await res.json();
-        // Map DB "number" to Frontend "id"
-        const mappedSeats: Seat[] = data.map((s: any) => ({
-          id: s.number,
-          status: s.status as SeatStatus
+        setSeats(data.map((s: any) => ({ id: s.number, status: s.status as SeatStatus })));
+        setTelemetry((p) => ({ ...p, lastActionMessage: 'System Synchronized' }));
+      } catch {
+        setTelemetry((p) => ({
+          ...p,
+          lastActionType: 'LOCK',
+          lastActionMessage: 'Backend offline — start/redeploy the API',
         }));
-        setSeats(mappedSeats);
-        setTelemetry(prev => ({ ...prev, lastActionMessage: "System Synchronized" }));
-      } catch (err) {
-        console.error("Failed to sync seats:", err);
       }
     };
     fetchSeats();
 
-    // Listen for updates
-    socket.on('seat-update', (data: { seatNumber: number; status: SeatStatus }) => {
-      // console.log("Update received:", data);
-      setSeats(prev => prev.map(seat => {
-        if (seat.id === data.seatNumber) {
-          // Remove from pending if it was pending
-          if (pendingSeats.has(seat.id)) {
-            const newPending = new Set(pendingSeats);
-            newPending.delete(seat.id);
-            setPendingSeats(newPending);
-          }
-          setTelemetry(prev => ({
-            ...prev,
-            kafkaEvents: prev.kafkaEvents + 1,
-            dbWrites: prev.dbWrites + 1,
-            lastActionType: 'KAFKA',
-            lastActionMessage: `Confirmed: Seat ${data.seatNumber}`
-          }));
-          return { ...seat, status: data.status };
-        }
-        return seat;
+    const onUpdate = (data: { seatNumber: number; status: SeatStatus }) => {
+      setSeats((prev) =>
+        prev.map((seat) => (seat.id === data.seatNumber ? { ...seat, status: data.status } : seat))
+      );
+      setTelemetry((p) => ({
+        ...p,
+        kafkaEvents: p.kafkaEvents + 1,
+        lastActionType: 'KAFKA',
+        lastActionMessage: `Live update: Seat ${data.seatNumber} → ${data.status}`,
       }));
-    });
-
-    return () => {
-      socket.off('seat-update');
     };
-  }, [pendingSeats]);
+
+    socket.on('seat-update', onUpdate);
+    return () => {
+      socket.off('seat-update', onUpdate);
+    };
+  }, []);
 
   useEffect(() => {
-    const bookedCount = seats.filter(s => s.status === 'BOOKED').length;
-    setMetrics({
-      booked: bookedCount,
-      available: 100 - bookedCount
-    });
+    const booked = seats.filter((s) => s.status === 'BOOKED').length;
+    setMetrics({ booked, available: seats.length - booked });
   }, [seats]);
 
   const handleSeatClick = async (seat: Seat) => {
     if (seat.status !== 'AVAILABLE') return;
 
-    // 1. Optimistic UI Update (Yellow/Pending)
-    setPendingSeats(prev => new Set(prev).add(seat.id));
-    setSeats(prev => prev.map(s =>
-      s.id === seat.id ? { ...s, status: 'PENDING' } : s
-    ));
+    // Optimistic pending state
+    setSeatStatus(seat.id, 'PENDING');
+    setTelemetry((p) => ({ ...p, lastActionType: 'LOCK', lastActionMessage: `Acquiring lock: Seat ${seat.id}` }));
 
     try {
-      // 2. Fire and Forget (Async Architecture)
-      // We don't wait for the booking confirmation here. 
-      // We wait for the Websocket event to turn it Red.
-      setTelemetry(prev => ({
-        ...prev,
-        locksAcquired: prev.locksAcquired + 1,
-        lastActionType: 'LOCK',
-        lastActionMessage: `Checking Lock: Seat ${seat.id}`
-      }));
-
-      const res = await fetch(`${API_URL}/api/book-async`, {
+      const res = await fetch(`${API_URL}/api/book`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `seat-${seat.id}-${Date.now()}`,
+        },
         body: JSON.stringify({
-          userId: `demo_user_${Math.floor(Math.random() * 1000)}`,
-          seatNumber: seat.id
-        })
+          userId: `demo_user_${Math.floor(Math.random() * 100000)}`,
+          seatNumber: seat.id,
+        }),
       });
 
-      if (res.status === 409) {
-        // Seat was actually already booked (race condition or stale state)
-        // Correct the UI to show it as BOOKED
-        setSeats(prev => prev.map(s =>
-          s.id === seat.id ? { ...s, status: 'BOOKED' } : s
-        ));
-        // Remove from pending
-        setPendingSeats(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(seat.id);
-          return newSet;
-        });
-      } else if (!res.ok) {
-        // Other errors (500, etc) - Revert
-        setSeats(prev => prev.map(s =>
-          s.id === seat.id ? { ...s, status: 'AVAILABLE' } : s
-        ));
-        setPendingSeats(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(seat.id);
-          return newSet;
-        });
+      if (res.ok) {
+        // Confirmed by the server (HTTP 200) — update immediately. The socket
+        // event will also arrive (idempotent), keeping other clients in sync.
+        setSeatStatus(seat.id, 'BOOKED');
+        setTelemetry((p) => ({
+          ...p,
+          locksAcquired: p.locksAcquired + 1,
+          dbWrites: p.dbWrites + 1,
+          lastActionType: 'DB',
+          lastActionMessage: `Booked Seat ${seat.id}`,
+        }));
+      } else if (res.status === 409) {
+        // Lost the race — someone else got it first.
+        setSeatStatus(seat.id, 'BOOKED');
+        setTelemetry((p) => ({
+          ...p,
+          locksAcquired: p.locksAcquired + 1,
+          lastActionType: 'LOCK',
+          lastActionMessage: `Seat ${seat.id} already taken`,
+        }));
+      } else {
+        setSeatStatus(seat.id, 'AVAILABLE');
+        setTelemetry((p) => ({ ...p, lastActionMessage: `Booking failed (HTTP ${res.status})` }));
       }
-
-      // If 200 OK, we do nothing and wait for Socket event
-      // to confirm the booking (and transition options).
-
-    } catch (err) {
-      console.error("Booking request failed", err);
-      // Revert on failure (optional for this simple demo)
-      setSeats(prev => prev.map(s =>
-        s.id === seat.id ? { ...s, status: 'AVAILABLE' } : s
-      ));
-      setPendingSeats(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(seat.id);
-        return newSet;
-      });
+    } catch {
+      // Network error = backend unreachable. Make that obvious, don't fail silently.
+      setSeatStatus(seat.id, 'AVAILABLE');
+      setTelemetry((p) => ({
+        ...p,
+        lastActionType: 'LOCK',
+        lastActionMessage: 'Backend unreachable — is the API awake?',
+      }));
     }
   };
 
@@ -174,7 +143,7 @@ function App() {
       </div>
 
       <div className="grid">
-        {seats.map(seat => (
+        {seats.map((seat) => (
           <div
             key={seat.id}
             onClick={() => handleSeatClick(seat)}
@@ -189,7 +158,7 @@ function App() {
       <Visualizer metrics={telemetry} />
 
       <p style={{ marginTop: '2rem', color: '#666', fontSize: '0.8rem' }}>
-        Backend: Node.js + Fastify + Redis + Kafka | Frontend: React + Socket.io
+        Backend: Node.js + Fastify + Redis + Postgres | Frontend: React + Socket.io
       </p>
     </div>
   );
