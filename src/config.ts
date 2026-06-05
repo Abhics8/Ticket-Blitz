@@ -39,6 +39,10 @@ export const config = {
   outboxPollMs: Number(process.env.OUTBOX_POLL_MS) || 500,
   // Reservation expiry sweep interval.
   sweepMs: Number(process.env.SWEEP_MS) || 2000,
+
+  // Demo convenience: auto-create an event + seats on boot if the table is empty.
+  autoSeed: process.env.AUTO_SEED === 'true',
+  seatCount: Number(process.env.SEAT_COUNT) || 100,
 } as const;
 
 export type AppConfig = typeof config;

@@ -1,31 +1,27 @@
 services:
-  # TicketBlitz Unified Service (API + Worker)
+  # TicketBlitz API. Booking works with Postgres + Redis alone; the Kafka worker
+  # (outbox relay, consumer, sweeper) is optional and can be added later.
   - type: web
     name: ticket-blitz-api
     runtime: node
     plan: free
-    buildCommand: npm install && npm run build
-    startCommand: npm run start:api
+    # --include=dev so tsc + prisma CLI are available for build & migrate.
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npx prisma migrate deploy && node dist/index.js
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 10000
-      - key: SINGLE_PROCESS
-        value: "true"
+      - key: AUTO_SEED
+        value: 'true'
+      - key: SEAT_COUNT
+        value: '100'
       - key: DATABASE_URL
         fromDatabase:
           name: ticket-blitz-db
           property: connectionString
-      - key: REDIS_HOST
-        sync: false
-      - key: REDIS_PORT
-        value: 6379
-      - key: KAFKA_BROKERS
-        sync: false
-      - key: KAFKA_USERNAME
-        sync: false
-      - key: KAFKA_PASSWORD
+      # Redis connection string (e.g. Upstash): rediss://default:***@xxx.upstash.io:6379
+      - key: REDIS_URL
         sync: false
 
 databases:

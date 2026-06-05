@@ -1,5 +1,5 @@
 import './tracing';
-import Fastify, { FastifyRequest } from 'fastify';
+import Fastify, { FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import { Server } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
@@ -102,7 +102,7 @@ app.get('/api/random-seat', async () =>
  * Correct one-shot booking. Rate-limited, idempotent, waiting-room gated, and
  * backed by the three-layer concurrency safety in booking-service.
  */
-app.post('/api/book', async (req, reply) => {
+const bookHandler = async (req: FastifyRequest, reply: FastifyReply) => {
   const parsed = BookSchema.safeParse(req.body);
   if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
   const { userId, seatNumber, eventId } = parsed.data;
@@ -126,7 +126,10 @@ app.post('/api/book', async (req, reply) => {
   const status = (out.body as BookResult).status;
   if (status === 'BOOKED') emitSeat(seatNumber, 'BOOKED');
   return reply.code(out.code).send(out.body);
-});
+};
+app.post('/api/book', bookHandler);
+// Back-compat alias — the original frontend posts to /api/book-async.
+app.post('/api/book-async', bookHandler);
 
 /** Phase 1 — hold a seat for config.holdTtlSeconds. */
 app.post('/api/reserve', async (req, reply) => {
@@ -201,18 +204,41 @@ app.post('/api/book-naive', async (req, reply) => {
 });
 
 // ---- bootstrap ----
+async function ensureSeeded(): Promise<void> {
+  if (!config.autoSeed) return;
+  if ((await prisma.seat.count()) > 0) return;
+  const event = await prisma.event.create({
+    data: { name: 'The Eras Tour', date: new Date(), totalSeats: config.seatCount },
+  });
+  await prisma.seat.createMany({
+    data: Array.from({ length: config.seatCount }, (_, i) => ({
+      number: i + 1,
+      row: 'A',
+      status: 'AVAILABLE',
+      eventId: event.id,
+    })),
+  });
+  app.log.info(`auto-seeded ${config.seatCount} seats`);
+}
+
 async function main() {
   await app.register(cors, {
-    origin: ['http://localhost:5173', 'https://ticket-blitz.vercel.app'],
+    origin: [/\.vercel\.app$/, 'http://localhost:5173', process.env.FRONTEND_URL || ''].filter(Boolean),
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   });
+
+  await ensureSeeded();
 
   const address = await app.listen({ port: config.port, host: '0.0.0.0' });
 
   io = new Server(app.server, { cors: { origin: '*' } });
   // Redis adapter -> a seat-update emitted on ANY instance reaches clients on
   // EVERY instance. Without this, real-time breaks the moment you scale past 1.
-  io.adapter(createAdapter(pubClient, subClient));
+  try {
+    io.adapter(createAdapter(pubClient, subClient));
+  } catch {
+    app.log.warn('Socket.IO Redis adapter disabled (single-instance fan-out only)');
+  }
   app.decorate('io', io);
   io.on('connection', (s) => app.log.info(`socket connected ${s.id}`));
 
