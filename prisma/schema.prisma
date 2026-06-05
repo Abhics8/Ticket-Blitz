@@ -25,24 +25,64 @@ model Event {
 }
 
 model Seat {
-  id        String   @id @default(uuid())
-  number    Int
-  row       String
-  status    String   @default("AVAILABLE")
-  version   Int      @default(0)
-  eventId   String
-  event     Event    @relation(fields: [eventId], references: [id])
-  booking   Booking?
-  
+  id           String        @id @default(uuid())
+  number       Int
+  row          String
+  // Lifecycle: AVAILABLE -> HELD -> BOOKED  (or HELD -> AVAILABLE on expiry)
+  status       String        @default("AVAILABLE")
+  // Optimistic-concurrency token. Every state transition does a compare-and-swap
+  // on this column, so a lost update is impossible even if the Redis lock fails.
+  version      Int           @default(0)
+  eventId      String
+  event        Event         @relation(fields: [eventId], references: [id])
+  booking      Booking?
+  reservations Reservation[]
+
   @@unique([eventId, number])
+  @@index([status])
 }
 
 model Booking {
   id        String   @id @default(uuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id])
+  // The final, database-level guarantee against double-booking. Even if the
+  // Redis lock AND the version CAS both failed, Postgres physically cannot
+  // store two bookings for one seat.
   seatId    String   @unique
   seat      Seat     @relation(fields: [seatId], references: [id])
   status    String   @default("CONFIRMED")
   createdAt DateTime @default(now())
+}
+
+// Two-phase booking: a seat is HELD for a short TTL, then CONFIRMED (paid) or
+// auto-EXPIRED back to AVAILABLE. Mirrors how real ticketing systems work.
+model Reservation {
+  id             String   @id @default(uuid())
+  seatId         String
+  seat           Seat     @relation(fields: [seatId], references: [id])
+  userId         String
+  status         String   @default("HELD") // HELD | CONFIRMED | EXPIRED | RELEASED
+  idempotencyKey String?  @unique
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@index([seatId])
+  @@index([status, expiresAt])
+}
+
+// Transactional outbox. Domain events are written in the SAME database
+// transaction as the booking, then relayed to Kafka by a separate poller.
+// This removes the dual-write problem and gives effectively-once delivery
+// (at-least-once publish + idempotent consumer).
+model OutboxEvent {
+  id          String    @id @default(uuid())
+  aggregateId String
+  type        String // SEAT_HELD | SEAT_BOOKED | SEAT_RELEASED
+  payload     Json
+  status      String    @default("PENDING") // PENDING | PUBLISHED
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+
+  @@index([status, createdAt])
 }
