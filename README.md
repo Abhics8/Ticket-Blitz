@@ -153,7 +153,7 @@ system-design.md           Architecture decisions, tradeoffs, and scale analysis
 
 ## 👤 Author
 
-**Abhi Bhardwaj** — MS Computer Science, George Washington University
+**Abhi Bhardwaj**
 
 [![Portfolio](https://img.shields.io/badge/Portfolio-1B2A4A)](https://abhics8.github.io/Portfolio)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?logo=linkedin)](https://www.linkedin.com/in/abhi-bhardwaj-23b0961a0/)
