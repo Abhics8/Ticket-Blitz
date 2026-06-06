@@ -1,6 +1,10 @@
 import Redis from 'ioredis';
 
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+  maxRetriesPerRequest: 3,
+});
+// A Redis connection blip must never crash the process.
+redis.on('error', () => undefined);
 
 export class DistributedLock {
   constructor(private readonly lockKey: string, private readonly ttlSeconds: number = 30) {}

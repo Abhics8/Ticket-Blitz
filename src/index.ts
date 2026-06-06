@@ -239,7 +239,6 @@ async function main() {
   } catch {
     app.log.warn('Socket.IO Redis adapter disabled (single-instance fan-out only)');
   }
-  app.decorate('io', io);
   io.on('connection', (s) => app.log.info(`socket connected ${s.id}`));
 
   app.log.info(`API ${config.instanceId} listening on ${address}`);
