@@ -203,6 +203,26 @@ app.post('/api/book-naive', async (req, reply) => {
   return { success: !!b, bookingId: b?.id };
 });
 
+/**
+ * Admin: wipe bookings/reservations and flip every seat back to AVAILABLE —
+ * a one-call "fresh demo" reset. Protected by the ADMIN_TOKEN header; the route
+ * is disabled (403) unless ADMIN_TOKEN is configured.
+ */
+app.post('/api/admin/reset', async (req, reply) => {
+  if (!config.adminToken || req.headers['x-admin-token'] !== config.adminToken) {
+    return reply.code(403).send({ error: 'forbidden' });
+  }
+  await prisma.$transaction([
+    prisma.booking.deleteMany({}),
+    prisma.reservation.deleteMany({}),
+    prisma.seat.updateMany({ data: { status: 'AVAILABLE', version: { increment: 1 } } }),
+  ]);
+  const available = await prisma.seat.count({ where: { status: 'AVAILABLE' } });
+  app.log.info(`admin reset → ${available} seats available`);
+  if (io) io.emit('seats-reset', { available });
+  return { status: 'reset', available };
+});
+
 // ---- bootstrap ----
 async function ensureSeeded(): Promise<void> {
   if (!config.autoSeed) return;

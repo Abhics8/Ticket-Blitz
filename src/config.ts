@@ -43,6 +43,9 @@ export const config = {
   // Demo convenience: auto-create an event + seats on boot if the table is empty.
   autoSeed: process.env.AUTO_SEED === 'true',
   seatCount: Number(process.env.SEAT_COUNT) || 100,
+
+  // Protects POST /api/admin/reset (the route is disabled if this is unset).
+  adminToken: process.env.ADMIN_TOKEN || '',
 } as const;
 
 export type AppConfig = typeof config;
