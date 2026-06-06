@@ -1,6 +1,7 @@
 # 🎟️ TicketBlitz — High-Concurrency Seat Booking Engine
 
 [![CI](https://github.com/Abhics8/Ticket-Blitz/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhics8/Ticket-Blitz/actions)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-ticket--blitz.vercel.app-4CAF50?logo=vercel&logoColor=white)](https://ticket-blitz.vercel.app/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-000?logo=fastify)](https://fastify.dev/)
 [![Postgres](https://img.shields.io/badge/PostgreSQL-316192?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -9,6 +10,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > A distributed booking system built around one hard problem: **selling each seat exactly once when thousands of people click "buy" at the same instant.** It solves it with three independent layers of concurrency safety and proves it with a load test that asserts zero oversells.
+
+**🚀 [Try the live demo →](https://ticket-blitz.vercel.app/)** &nbsp;|&nbsp; **📐 [System Design doc →](system-design.md)**
 
 ---
 
@@ -33,7 +36,8 @@ A booking is only safe if it survives all three — any one is enough on its own
 | **2. Optimistic** | Version-column compare-and-swap: `UPDATE … WHERE id = ? AND version = ?` | Lost updates even if the lock expired mid-transaction |
 | **3. Database** | `Booking.seatId` `UNIQUE` constraint | The final backstop — Postgres physically cannot store two bookings for one seat (`P2002` → `409`) |
 
-> See [`src/services/booking-service.ts`](src/services/booking-service.ts). The unit tests in [`tests/booking-service.test.ts`](tests/booking-service.test.ts) prove each layer’s behaviour deterministically.
+> See [`src/services/booking-service.ts`](src/services/booking-service.ts). The unit tests in [`tests/booking-service.test.ts`](tests/booking-service.test.ts) prove each layer's behaviour deterministically.
+> For the full design rationale, tradeoffs, and scale analysis — see **[`system-design.md`](system-design.md)**.
 
 ## Architecture
 
@@ -52,7 +56,7 @@ flowchart LR
     API -->|OTLP| J[Jaeger]
 ```
 
-**Two-phase booking** (real ticketing flow): `reserve` puts a seat into `HELD` with a TTL → `confirm` turns it into `BOOKED` → if the holder never pays, the worker’s **sweeper** expires it back to `AVAILABLE`. `POST /api/book` is the one-shot path used by the load test.
+**Two-phase booking** (real ticketing flow): `reserve` puts a seat into `HELD` with a TTL → `confirm` turns it into `BOOKED` → if the holder never pays, the worker's **sweeper** expires it back to `AVAILABLE`. `POST /api/book` is the one-shot path used by the load test.
 
 **Why an outbox?** The domain event is written in the *same transaction* as the booking, then a relay publishes it to Kafka. That removes the dual-write problem and — with an idempotent producer and a dedupe-on-event-id consumer — gives effectively-once delivery.
 
@@ -136,6 +140,7 @@ scripts/verify-oversell.ts DB-level correctness proof
 tests/                     Jest suites
 k8s/                       Deployment + Service + HPA
 observability/             Prometheus config
+system-design.md           Architecture decisions, tradeoffs, and scale analysis
 ```
 
 ## Honest limitations / roadmap
