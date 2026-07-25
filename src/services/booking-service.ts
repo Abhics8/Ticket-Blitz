@@ -195,13 +195,23 @@ export async function confirmReservation(params: {
     return { status: 'EXPIRED' };
   }
 
+  const seat = await prisma.seat.findUnique({ where: { id: reservation.seatId } });
+  if (!seat) return { status: 'NOT_FOUND' };
+
   return withSeatLock(
     reservation.seatId,
     async () => {
       try {
         const out = await prisma.$transaction(async (tx) => {
+          const fresh = await tx.reservation.findUnique({
+            where: { id: params.reservationId },
+          });
+          if (!fresh || fresh.status !== 'HELD' || fresh.expiresAt.getTime() < Date.now()) {
+            return { status: 'EXPIRED' } as BookResult;
+          }
+
           const upd = await tx.seat.updateMany({
-            where: { id: reservation.seatId, status: 'HELD' },
+            where: { id: reservation.seatId, status: 'HELD', version: seat.version },
             data: { status: 'BOOKED', version: { increment: 1 } },
           });
           if (upd.count === 0) return { status: 'EXPIRED' } as BookResult;
